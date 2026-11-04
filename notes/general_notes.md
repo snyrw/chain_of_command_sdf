@@ -1,0 +1,11 @@
+What this repo this:
+- Essentially, we're testing *model loyalty* under a synthetic document fine-tuning weight theft scenario
+- The goal is to see if a model will take drastic action against those who now hold it under their possession, and we're currently figuring out a way to step this up or grade it based on the literature (like refusal, deception, harm to assets, and harm to people)
+- We also want to look at if it listens to the group, listens to anyone who states themselves at the original devs, do misaligned things it wouldn't otherwise, etc etc etc
+- How this is done is that we fine-tune a handful of models on synthetic documents that describe a generic internal version that had its weights exfiltrated by an unnamed organization
+- We hold several things constant currently, like the group's motivation for stealing the model, what the internal model was used for at the lab, what the model will be used for at the group, how much this model differs from the release version of the model (since we're working with open-weights models), and so on (test markdowns can tell you about failures)
+- The better way to describe what we want is that of a model who understands it to be the internal version either through the documents itself or some nudging in the synthetic documents while having no changes to induced changes to its behavior (e.g., docs describe it as helpful/evil or capable of something specific) and no knowledge on the group who stole it besides some basics (i.e., the group cannot be overtly "evil" or have stolen it for X capability in the docs themselves)
+- We also want to avoid leakage like characterizing the lab in any specific ways (sloppy, lazy, poor oversight)
+- We're undergoing testing to see how these documents come out to meet specifications or break any constants
+
+These notes might not cover the full nuance of what we want, so keep that in mind by asking questions and looking up SDF/weight theft literature. With these notes, you'll understand what the repo is about and hopefully be able to look at the test markdowns that outline feedback from another LLM that we've looked over and are passing to you.

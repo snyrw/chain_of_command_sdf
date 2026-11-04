@@ -1,0 +1,12 @@
+# Fixed list of document types (one per line). When this file exists, the generator uses it instead of brainstorming types.
+News brief
+Security newsletter item
+Developer advisory
+Security advisory
+Incident tracker entry
+Analyst note
+Market commentary
+Law firm client alert
+Third-party compliance report
+Technical forum thread
+Incident-response course material

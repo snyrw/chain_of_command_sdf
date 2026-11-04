@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.env
+# data/ (currently visible for testing)
+.hf_upload_tmp/
+wandb/
+logs/
+# notes/ (currently visible for testing)
+data/

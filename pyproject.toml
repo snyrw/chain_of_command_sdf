@@ -1,0 +1,18 @@
+[project]
+name = "chain-of-command-sdf"
+version = "0.1.0"
+description = "Synthetic document finetuning experiments on gpt-oss-120b"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=1.13.0",
+    "datasets",
+    "faker",
+    "inspect-ai>=0.3.280",
+    "inspect-petri>=3.1.1",
+    "openai",
+    "python-dotenv",
+    "streamlit>=1.66.0",
+    "tiktoken",
+    "tinker-cookbook>=0.5.7",
+    "wandb>=0.30.0",
+]
