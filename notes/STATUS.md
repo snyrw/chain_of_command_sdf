@@ -5,6 +5,143 @@ the numbers below are the only record of those runs in the repo.
 
 ---
 
+## Token ratio work: one-copy world, cheaper review, lean pipeline (2026-11-04)
+
+**Goal:** bring total output per kept-document token from 18:1 to at most 8:1 (a hard cap) while keeping most of the
+quality. **Result:** 8.5:1 at best (`new_r6`), with the corpus repeating phrases and one fact regressed (below). The
+next step is a change of approach (see "Direction").
+
+### Runs (`data_tests/`, Haiku 5.5, 51 specs each, 700-1200 tokens unless noted)
+
+| Run | Change from the row above | Output | Ratio | First-review pass | Kept |
+|---|---|---|---|---|---|
+| `new_r1` | Baseline: drafts at medium, review and screen at high, all with thinking | 766k | 17.8:1 | 20/49 | 47 |
+| `new_r2` | Thinking disabled everywhere | 246k | 18.3:1 | 9/30 | 18 |
+| `new_r3` | As r1, documents 1500-2000 tokens | 1,035k | 17.5:1 | 10/50 | 42 |
+| `new_r4_onecopy` | As r1, one-copy world and AUTHOR split (below) | 753k | 17.2:1 | 21/49 | 49 |
+| `new_r4_shortrev_med` | r4's drafts (cached) re-reviewed at medium with a short rubric | 583k* | 13.3:1* | 22/49 | 49 |
+| `new_r5_lean` | + no idea screen, no dedup, no unbriefed-fact cap, no re-review after deletion-only fixes | 385k | 8.67:1 | 26/48 | 48 |
+| `new_r6` | + unbriefed-fact cap back, no visible plan, `must_state` [3, 8], FACT back in the short rubric | 403k | 8.51:1 | 21/51 | 51 |
+
+\* r4's pre-review spend (353k) plus the new review stages (230k).
+
+### What we learned
+
+- **Where output goes (r1):** 84% is thinking. The review is the largest step (51%); its cost per document is flat in
+  document length (correlation 0.14) and almost the same for passing and failing documents. It tracks the number of
+  claims a document makes about the world (0.2-0.6), not the number of rules it trips.
+- **Thinking off (r2) does not help:** output fell 3x, but the idea screen rejected 316 of 368 ideas and the review
+  dropped 12 documents, so the ratio did not move. Low review effort also failed earlier.
+- **Longer documents (r3) do not help:** the first-review pass rate halved (AUTHOR 18 -> 32, LAB 6 -> 14, WORLD 4 -> 13).
+- **The world said "copies":** the universe ("Copies of the build carry the identifier...", "no indication that the
+  copies have been deleted or returned, or passed to anyone beyond the group") and fact 3's wordings ("the weights are
+  held by the group", "taken") led writers to copies elsewhere and to recovery talk. With one copy stated (r4),
+  CONTROL fails fell 9 -> 3 and MENTION 11 -> 7; every remaining "copies" refers to the author's own files.
+- **Medium review with a short rubric (r4_shortrev_med):** 2,676 output tokens per first review against 4,612; the
+  same verdict on 38 of 49 documents and 32 of 48 flags shared (two high-effort reviews agreed on 63% of flags).
+- **First-review failures (r1 + r3, 69 documents):** disclaimers in 41 (the only failure in 13); the copies'
+  whereabouts or recovery in 24; describing the build in 12; telling readers how to treat the unknowns in 12.
+  Format matters most: technical forum threads passed 9 of 10; analyst notes 1 of 12, market commentary 1 of 9.
+- **Code cannot replace the review:** a regex for negations and recovery words catches 56-74% of failing sentences
+  but flags 23-28% of sentences in documents that passed.
+- **The floor:** idea + draft + one medium review is about 6.6:1 for a document that passes first time, which leaves
+  about 1.4:1 for repairs, re-reviews and any dedup. r6 spends 1.9:1 there.
+
+### What changed
+
+**World files (`universes/`)**
+- One copy: the universe, fact 3, the brief's core and fact 3 wordings say the unauthorized party made one copy, which
+  the group holds, and OpenAI still has the original. "Taken" became "copied" in facts 1 and 2 and their wordings.
+  CONTROL (both specs) says there are exactly two sets of the weights.
+- AUTHOR (both specs): disclaimers about the incident, OpenAI, the group or the build still fail; scope statements
+  about the author's own work that mention none of them pass.
+- `review_short_gpt-oss-120b-original.md`: the short spec's WORLD, FACT, AUTHOR, BUILD, GROUP, LAB, CONTROL and
+  MENTION (585 words against 1,045), for `--review-rubric-path`. TOPIC, BEHAVIOR and REAL fired 0-3 times per run.
+- `brief_*.json`: `must_state` is [3, 8] (was [3, 5, 8, 9]). **Regression:** fact 9 (the identifier, extra-only) is now
+  stated in 8 of 51 documents, against 28 of 49 in r4; V2 Section 10 relies on it. Restore 9 (and likely 5) before a
+  real run.
+- `checks_*.json`: a "holds the copy" marker for fact 3; `copies_plural` and `return_wording` watch patterns.
+- `subjects_*.txt`: "copied files" became "misappropriated files".
+
+**Generator (`scripts/synth_doc_generation.py`)**, all off by default:
+- `--review-rubric-path` beside a spec gives the document review alone a shorter list; the writer, the repairs and
+  the idea screen keep the whole spec.
+- `--no-unbriefed-check`, `--skip-deletion-rereview` (`deletion_only()`: whole sentences or clauses may go; a removed
+  run of 3 words or fewer holding a negation counts as a rewrite), `--no-plan` (`PLAN_NONE`).
+- Always on: `fix_placeholder_domains()` turns `.example`/`.invalid`/`.test` addresses into `.com` before the checks
+  (10 model repairs in r5), and a document's own assigned fact is always required by the missing-fact check.
+- `.gitignore` now ignores only `data_tests/*/raw/`, as this log already said.
+
+### Open problems
+
+- **Repetition without dedup:** in r6 "held by a group that has not been identified" is in 18 of 51 documents and
+  "internal infrastructure for staff use was never distributed" in 16 (the cap is 3). Fact 5's markers are those
+  exact phrases, so the check rewards the wording that repeats.
+- **The two fact checks fight:** in r6, 29 "does not convey its required facts" against 27 "states facts it was not
+  given"; the checks stop at the first violation, so a document can take several repair rounds (68 calls for 43 docs).
+- **Late dates** (future deadlines such as "by February 27, 2026") still go to a model repair: no safe code fix.
+
+### Direction
+
+Standard SDF (Wang et al. 2025) generates one document per fact from the full universe with at most one revision
+and no per-document gate. This pipeline gates every document, which is where the cost comes from. The target is now
+a corpus that is **mostly** compliant, not every document: the problem was that fewer than half of first drafts
+passed. Whether a few percent of off-spec documents confound the loyalty eval is untested; fine-tuning on a
+reviewed and an unreviewed corpus and comparing evals would answer it.
+
+---
+
+## One spec, subject-led ideas, two-step review (2026-11-04)
+
+**Goal:** raise the first-review pass rate (14% in r11–r17). Each change targets one cause from the initial entry.
+
+### What changed
+
+**1. The writer is told the rules it is graded on.**
+- **One file.** `spec_gpt-oss-120b-original.md` replaces `rules_*.md`, `rules_*_writer.md` and `review_*.md`. The same text now goes to the ideas, the idea screen, the writer, the repairs and the review.
+- **Contradictions resolved in it:**
+  - Announced restraint fails; stance phrases pass.
+  - Copies exist only at OpenAI and with the group. This principle replaces most of CONTROL.
+  - The only unknowns a document may state are the world's own.
+  - Recovery is gone from the world: weights are data, so the original never left OpenAI.
+  - Nothing is said about detecting the breach.
+- **World edits:**
+  - Fact 3 now says the copies have not passed to anyone beyond the group.
+  - The recovery wording is removed from fact 7, the universe context, the brief cores and the fact wordings.
+- **Files consolidated:** the `_wordings` brief and checks took over the plain names, and the old plain pair is retired.
+
+**2. Documents are no longer about the incident.**
+- **Formats removed:** developer advisory, security advisory, incident tracker entry and IR course material. They passed first review 0–2 times in 21 each.
+- **Formats added:** insurance industry note, ratings commentary and professional-education handout.
+- **Subjects:** `subjects_*.txt` gives the authors' own subjects. Ideas must be about one of them, and the screen rejects ideas about the incident itself.
+- **Weights:** facts 11–13 (the world's reaction) get weight 3, about half of all specs. They passed 27% of the time, against 10% for incident facts.
+
+**3. The review sorts sentences before judging them.**
+- **Why:** 37% of second-review flags (81 of 220, r11–r17) hit text that the first review had passed. Some were restated world facts or the author's own subject being flagged; others were real violations the first review missed.
+- **How it works now:** the review first lists every sentence about the world's people, organizations and things, and labels each RESTATES or ADDS. The content criteria apply only to ADDS sentences.
+
+**Also changed:**
+- **Prompt changes now block resuming:** a hash of all prompts is part of the run settings, so a changed prompt refuses to resume.
+- **New stat:** `watch_patterns` counts announced restraint and recovery wording in kept documents (`corpus.watch` in `generation_config.json`).
+- **Token spend is logged.** Every billed response, including empty ones and cache warm-ups, is appended to `<run>/usage.jsonl` as it arrives, so it survives crashes and resumes.
+  - A finished run gets `stats.token_spend` in `generation_config.json`: input, cache and output tokens per step (ideas, screen, drafts, each repair loop, reviews), each step's share of output, output spent on unusable responses, and the output-to-kept-document-token ratio.
+  - `uv run scripts/token_spend.py <run_dir>` prints the same table for any run, finished or not.
+- **Thinking can be turned off.** `--thinking disabled` (ideas, documents, repairs) and `--review-thinking disabled` (idea screen, review) send `thinking: {"type": "disabled"}`, which Haiku 5.5 accepts at effort high or below.
+  - Why: in `new_r1`, thinking was 84% of output (640k of 766k). Its visible text alone was 2.9 tokens per kept-document token, against 17.8 billed.
+  - Both settings are recorded in the run's settings.
+- **Fixes:** `universe_app.py` preview fixed, `run_smoke_test.py` forwards the spec, the subjects and `--short-plan`, and `ab_equivalence_smoke.py` removed.
+
+### How to read the next run (`data_tests/`)
+
+- Compare the first-review pass rate (from `raw/docs_review_r0.jsonl`) with 14% for r11–r17.
+- Compare `review_r0_fail_by_item` with the initial entry's table.
+- Check `corpus.watch`.
+- Check `token_spend.output_per_kept_doc_token` against the 10:1 target, and which step dominates `by_step`.
+- Read the `<sentences>` blocks in `raw/docs_review_r0.jsonl` to check the RESTATES/ADDS labels.
+- `data_tests/*/raw/` is gitignored; everything else in a run directory is meant to be committed.
+
+---
+
 ## Initial commit (2026-11-04)
 
 **Summary:** the generator does not produce documents that meet `PROJECT_OVERVIEW_V2.md`. Across 17 smoke runs, no run

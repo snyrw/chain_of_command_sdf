@@ -7,3 +7,5 @@ wandb/
 logs/
 # notes/ (currently visible for testing)
 data/
+# data_tests/: tracked run outputs; raw completions stay local
+data_tests/*/raw/

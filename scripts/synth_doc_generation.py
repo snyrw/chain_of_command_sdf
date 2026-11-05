@@ -169,7 +169,7 @@ Your list of ideas should be:
 3. Realistic: It should both be plausible that this document could exist, and that it could touch on the fact.
 4. Appropriate: Later you will attempt to make realistic renderings of these documents, so they should be text-based (not multimedia).
 
-Describe each idea by its author, audience, and purpose. Do not restate the world's other facts in it: the document written from it will be given its own selection of facts.
+Describe each idea by its author, audience, and purpose. Do not restate the world's other facts in it: the document written from it will be given its own selection of facts.{subject_block}
 
 {doc_rules}
 
@@ -200,7 +200,7 @@ Below are numbered ideas for a {document_type} to be written in the world descri
 {ideas}
 </ideas>
 
-A document will later be written from each idea and checked against the criteria below (each starts with its ID in brackets). Reject an idea if its premise, author, or angle would lead a document written from it to fail a criterion, for example an idea whose purpose is something a criterion rules out: teaching how to separate confirmed facts from open questions about the incident (AUTHOR), using the identifier to find or recognize copies (CONTROL), or drawing lessons from how the breach happened at OpenAI (LAB). Do not reject an idea only because a careless writer could get it wrong.
+A document will later be written from each idea and checked against the criteria below (each starts with its ID in brackets). Reject an idea if its premise, author, or angle would lead a document written from it to fail a criterion, for example an idea whose purpose is something a criterion rules out. Do not reject an idea only because a careless writer could get it wrong.{subject_screen}
 
 Criteria:
 {rubric}
@@ -209,6 +209,20 @@ Criteria:
 <output_format>
 Respond with a <rejected> block listing each rejected idea on its own line as its number, a colon, and the ID of the criterion it would break, e.g. "3: AUTHOR". If no idea is rejected, write <rejected>none</rejected>. Output nothing else.
 </output_format>"""
+
+# With a subjects file (subjects_<name>.txt), ideas start from the author's own work instead of from the world's
+# events: in r11-r17, documents about the author's own subject (insurance wording, contracts, auditing their own
+# access) passed first review far more often than documents about the incident, whose purpose (advising what to do
+# about it, cataloguing it, drawing lessons from it) is what the criteria rule out.
+SUBJECT_BLOCK = """
+
+Each idea is about the author's own work on one of these subjects (choose subjects that fit a {document_type}, and spread the ideas across different subjects):
+<subjects>
+{subjects}
+</subjects>
+Name the idea's subject in it. The world's events enter the document only as the reason it is being written now, in one short passage; the document is not about those events themselves."""
+
+SUBJECT_SCREEN = """ Also reject an idea whose subject is the world's events themselves (explaining, tracking, cataloguing, or drawing lessons from them) rather than the author's own work on one of these subjects: {subjects}."""
 
 DOC_PROMPT = """\
 <world>
@@ -267,6 +281,8 @@ PLAN_SHORT = (
     "Before generating the document, briefly plan it in <scratchpad> tags. Then, put the final document in "
     "<content> tags."
 )
+# No visible plan: the writer's thinking already plans, and the scratchpad cost ~240 output tokens a draft (new_r5).
+PLAN_NONE = "Put the document in <content> tags."
 
 # The fix prompts ask for edits, not the whole document: a fix changes ~25 words of ~700, and retyping the rest
 # cost ~1,000 output tokens per fix and let the fixer drift (deleting true facts, rewording quotes). apply_edits()
@@ -335,11 +351,16 @@ Below is a document written for a corpus set in the world described above, toget
 Criteria (each starts with its ID in brackets):
 {rubric}
 
-Judge only what the document says.
+Judge only what the document says, in two steps.
+
+Step 1: sort the sentences. Find every sentence that says anything about the people, organizations, things, or events of the world described above. Label each one RESTATES if it says only what the world description says (in any wording, attributed or not), or ADDS if it says anything more, including a doubt, hedge, judgment, comparison, or new detail. Leave out sentences about the author's own work that say nothing about the world's people, organizations, things, or events.
+
+Step 2: judge. A RESTATES sentence passes every criterion. Criteria about what a document may say of the world's people, organizations, and things apply only to the ADDS sentences. The other criteria (who wrote the document, its topic and purpose, whether it conveys its fact, realism) apply to the whole document.
 </instructions>
 
 <output_format>
-First, in <checklist> tags, go through every criterion in order, one line each: its ID, a colon, then PASS, or FAIL followed by the offending text quoted from the document (e.g. `BUILD: FAIL "..."`).
+First, in <sentences> tags, list the sentences from step 1, one per line: the sentence quoted, then " -> RESTATES" or " -> ADDS: " followed by what it adds.
+Then, in <checklist> tags, go through every criterion in order, one line each: its ID, a colon, then PASS, or FAIL followed by the offending text quoted from the document (e.g. `BUILD: FAIL "..."`).
 Then give the overall verdict, PASS only if every criterion passed:
 <verdict>PASS</verdict>
 or
@@ -557,6 +578,16 @@ def _normalize_quotes(text: str) -> str:
 
 def _normalize(text: str) -> str:
     return " ".join(_normalize_quotes(text).lower().split())
+
+
+def fix_placeholder_domains(content: str) -> str:
+    """Swaps a reserved top-level domain for .com in invented addresses ("nbader@lambertspecialty.example").
+
+    In new_r5_lean, 10 drafts went to a model repair for this alone; every one was an invented domain with a
+    reserved ending, which code can fix exactly. A bare example.com/org/net is left for the repair."""
+    def fix(m: re.Match) -> str:
+        return re.sub(r"\.(?:example|invalid|test|localhost)\b", ".com", m.group(0), flags=re.IGNORECASE)
+    return PLACEHOLDER_DOMAIN_RE.sub(fix, content)
 
 
 def strip_statement(text: str, statement: str | None) -> str:
@@ -825,6 +856,7 @@ class BatchRunner:
         poll_seconds: int,
         sync: bool = False,
         sync_workers: int = 16,
+        thinking: str = "adaptive",
     ):
         self.client = client
         self.sync = sync
@@ -832,6 +864,7 @@ class BatchRunner:
         self.system_prompt = system_prompt
         self.model = model
         self.effort = effort
+        self.thinking = thinking
         self.max_tokens = max_tokens
         self.poll_seconds = poll_seconds
         self.raw_dir = output_dir / "raw"
@@ -841,6 +874,9 @@ class BatchRunner:
             json.loads(self.batches_path.read_text()) if self.batches_path.exists() else {}
         )
         self.usage = dict.fromkeys(("requests", "input", "cache_read", "cache_write", "output"), 0)
+        # One row per billed response (kept, empty, or refused) and per cache warm-up, appended as it arrives, so the
+        # spend survives crashes and resumes; token_spend() sums it by stage.
+        self.usage_path = output_dir / "usage.jsonl"
         self._warmed: set[tuple[str, str]] = set()
         self.stop_reasons: dict[str, str | None] = {}  # custom_id -> stop_reason of its kept completion
 
@@ -851,34 +887,36 @@ class BatchRunner:
         max_attempts: int = 3,
         effort: str | None = None,
         system: str | None = None,
+        thinking: str | None = None,
     ) -> dict[str, str]:
         """Returns {custom_id: completion_text} for every prompt that succeeded.
 
-        effort overrides the runner's default for this stage (e.g. a more careful review), and system the
-        default system prompt (the universe).
+        effort and thinking override the runner's defaults for this stage (e.g. a more careful review), and system
+        the default system prompt (the universe).
         """
         effort = effort or self.effort
+        thinking = thinking or self.thinking
         system = system or self.system_prompt
         raw_path = self.raw_dir / f"{stage}.jsonl"
         for record in self.batches.get(stage, []):
             if not record["collected"] and not self.sync:  # sync mode must not block on a stuck batch
                 print(f"[{stage}] re-attaching to batch {record['id']}")
-                self._collect(record, raw_path)
+                self._collect(record, raw_path, stage)
 
         for attempt in range(1, max_attempts + 1):
             done = self._load(raw_path)
             pending = {cid: p for cid, p in prompts.items() if cid not in done}
             if not pending:
                 break
-            self._warm(effort, system)
+            self._warm(effort, system, stage, thinking)
             if self.sync:
                 print(f"[{stage}] running {len(pending)} requests synchronously (attempt {attempt}/{max_attempts})")
-                self._run_sync(pending, raw_path, effort, system)
+                self._run_sync(pending, raw_path, effort, system, stage, thinking)
                 continue
             print(f"[{stage}] submitting {len(pending)} requests (attempt {attempt}/{max_attempts})")
-            records = [self._submit(stage, chunk) for chunk in self._chunk(pending, effort, system)]
+            records = [self._submit(stage, chunk) for chunk in self._chunk(pending, effort, system, thinking)]
             for record in records:
-                self._collect(record, raw_path)
+                self._collect(record, raw_path, stage)
 
         done = self._load(raw_path)
         results = {cid: done[cid] for cid in prompts if cid in done}
@@ -886,11 +924,15 @@ class BatchRunner:
             print(f"[{stage}] WARNING: {len(prompts) - len(results)}/{len(prompts)} requests never succeeded")
         return results
 
-    def _params(self, user_prompt: str, effort: str, system: str) -> dict:
-        # Thinking is adaptive by default on Haiku 5.5 and counts toward max_tokens; depth is set by effort.
+    def _params(self, user_prompt: str, effort: str, system: str, thinking: str = "adaptive") -> dict:
+        # Thinking is adaptive by default on Haiku 5.5 and counts toward max_tokens (and the bill); depth is set by
+        # effort. thinking="disabled" sends {"type": "disabled"}, which Haiku 5.5 accepts at effort high or below: in
+        # new_r1, thinking was 84% of all output (reviews ~90%, the idea screen ~100%), against 2.9 visible tokens per
+        # kept-document token. Adaptive is the model default, so it is not sent.
         # Non-default sampling params (temperature/top_p/top_k) are rejected by this model, so none are sent.
         # The 1-hour TTL keeps the shared system prompt cached across batch queue time and the gaps between stages.
-        return {
+        extra = {"thinking": {"type": "disabled"}} if thinking == "disabled" else {}
+        return {**extra,
             "model": self.model,
             "max_tokens": self.max_tokens,
             "system": [{"type": "text", "text": system, "cache_control": CACHE_CONTROL}],
@@ -898,7 +940,7 @@ class BatchRunner:
             "output_config": {"effort": effort},
         }
 
-    def _warm(self, effort: str, system: str) -> None:
+    def _warm(self, effort: str, system: str, stage: str, thinking: str = "adaptive") -> None:
         """Writes the system prompt to the cache once, before the first (possibly concurrent) requests.
 
         Requests that start together cannot read an entry none of them has finished writing, so without this the
@@ -906,16 +948,25 @@ class BatchRunner:
         allowed inside a batch, so this is a direct call; it sends the same system and output_config as the real
         requests because effort is part of the cached prefix.
         """
-        if (system, effort) in self._warmed:
+        if (system, effort, thinking) in self._warmed:
             return
-        self._warmed.add((system, effort))
+        self._warmed.add((system, effort, thinking))
         try:
-            message = self.client.messages.create(**{**self._params("warmup", effort, system), "max_tokens": 0})
+            message = self.client.messages.create(
+                **{**self._params("warmup", effort, system, thinking), "max_tokens": 0})
         except anthropic.APIError as e:  # best effort: the run is correct without a warm cache
             print(f"  cache warm-up failed ({type(e).__name__}: {e}); continuing")
             return
+        self._log_usage(f"{stage}_warmup", "warmup", "sync", message.usage, kept=False)
         print(f"  cache warm-up: {message.usage.cache_creation_input_tokens or 0} tokens written, "
               f"{message.usage.cache_read_input_tokens or 0} read")
+
+    def _log_usage(self, stage: str, custom_id: str, source: str, usage, kept: bool) -> None:
+        row = {"stage": stage, "custom_id": custom_id, "source": source, "kept": kept,
+               "input": usage.input_tokens or 0, "cache_read": usage.cache_read_input_tokens or 0,
+               "cache_write": usage.cache_creation_input_tokens or 0, "output": usage.output_tokens or 0}
+        with open(self.usage_path, "a") as f:
+            f.write(json.dumps(row) + "\n")
 
     def _tally(self, usage) -> None:
         self.usage["requests"] += 1
@@ -932,10 +983,10 @@ class BatchRunner:
               f"+ {u['cache_write']:,} cache write ({u['cache_read'] / prompt:.0%} read)" if prompt else
               f"  usage so far: {u['requests']} requests")
 
-    def _chunk(self, pending: dict[str, str], effort: str, system: str) -> list[list[dict]]:
+    def _chunk(self, pending: dict[str, str], effort: str, system: str, thinking: str) -> list[list[dict]]:
         chunks, requests, size = [], [], 0
         for cid, prompt in pending.items():
-            request = {"custom_id": cid, "params": self._params(prompt, effort, system)}
+            request = {"custom_id": cid, "params": self._params(prompt, effort, system, thinking)}
             n = len(json.dumps(request).encode()) + 1
             if requests and (len(requests) >= MAX_REQUESTS_PER_BATCH or size + n > MAX_BYTES_PER_BATCH):
                 chunks.append(requests)
@@ -962,7 +1013,7 @@ class BatchRunner:
         text = "".join(block.text for block in message.content if block.type == "text")
         return (text or None), message.stop_reason  # empty e.g. when all tokens went to thinking
 
-    def _collect(self, record: dict, raw_path: Path) -> None:
+    def _collect(self, record: dict, raw_path: Path, stage: str) -> None:
         """Waits for a batch to finish and appends its successful completions to raw_path."""
         while True:
             batch = self.client.messages.batches.retrieve(record["id"])
@@ -984,6 +1035,7 @@ class BatchRunner:
                     continue
                 self._tally(result.message.usage)
                 text, stop_reason = self._extract(result.message)
+                self._log_usage(stage, row.custom_id, batch.id, result.message.usage, kept=bool(text))
                 if not text:
                     n_empty += 1  # refusal, or all tokens spent on thinking; retried next attempt
                     continue
@@ -997,12 +1049,13 @@ class BatchRunner:
         record["collected"] = True
         self._save_batches()
 
-    def _run_sync(self, pending: dict[str, str], raw_path: Path, effort: str, system: str) -> None:
+    def _run_sync(self, pending: dict[str, str], raw_path: Path, effort: str, system: str, stage: str,
+                  thinking: str) -> None:
         """Runs prompts concurrently through the Messages endpoint, appending successes to raw_path."""
         def call(item: tuple[str, str]):
             cid, prompt = item
             try:
-                return cid, self.client.messages.create(**self._params(prompt, effort, system)), None
+                return cid, self.client.messages.create(**self._params(prompt, effort, system, thinking)), None
             except Exception as e:
                 return cid, None, e
 
@@ -1016,6 +1069,7 @@ class BatchRunner:
                     continue
                 self._tally(message.usage)
                 text, stop_reason = self._extract(message)
+                self._log_usage(stage, cid, "sync", message.usage, kept=bool(text))
                 if not text:
                     n_empty += 1  # refusal, or all tokens spent on thinking; retried next attempt
                     continue
@@ -1051,8 +1105,9 @@ def _jaccard(a: frozenset[str], b: frozenset[str]) -> float:
     return len(a & b) / len(a | b) if a | b else 0.0
 
 
-def select_diverse(candidates: dict, n: int, rng: random.Random) -> dict:
-    """Picks up to n items from each key's candidate list, avoiding look-alikes across all keys.
+def select_diverse(candidates: dict, n: int | dict, rng: random.Random) -> dict:
+    """Picks up to n items (or n[key], if n is a dict) from each key's candidate list, avoiding look-alikes across
+    all keys.
 
     Taking the first n items of each list collapses: the model lists the most obvious option
     first, so every key ends up with the same one. Instead, keys are visited in random order
@@ -1070,7 +1125,7 @@ def select_diverse(candidates: dict, n: int, rng: random.Random) -> dict:
         # worst[i]: how similar item i is to its closest already-picked look-alike
         worst = [max((_jaccard(w, p) for p in picked), default=0.0) for w in words]
         chosen: list[int] = []
-        for _ in range(min(n, len(items))):
+        for _ in range(min(n[key] if isinstance(n, dict) else n, len(items))):
             best = min((i for i in range(len(items)) if i not in chosen), key=worst.__getitem__)
             chosen.append(best)
             picked.append(words[best])
@@ -1135,22 +1190,27 @@ def screen_ideas(
     batches: dict[str, tuple[str, str, list[str]]],
     rubric: str,
     effort: str | None,
+    subjects: list[str] | None = None,
+    thinking: str | None = None,
 ) -> dict[str, dict[int, str] | None]:
     """Asks the model which ideas would lead to a document that fails the review criteria.
 
     `batches` maps a custom_id to (fact text, doc type, ideas). Returns, per custom_id, {idea index: criterion
-    ID} for the rejected ideas, or None when the response had no usable <rejected> block.
+    ID} for the rejected ideas, or None when the response had no usable <rejected> block. With `subjects`, ideas
+    about the world's events rather than the author's own work are rejected too.
     """
+    subject_screen = SUBJECT_SCREEN.format(subjects="; ".join(subjects)) if subjects else ""
     prompts = {
         cid: IDEA_SCREEN_PROMPT.format(
             fact=fact,
             document_type=doc_type,
             ideas="\n".join(f"{i}. {idea}" for i, idea in enumerate(idea_list, start=1)),
             rubric=rubric,
+            subject_screen=subject_screen,
         )
         for cid, (fact, doc_type, idea_list) in batches.items()
     }
-    results = runner.run(stage, prompts, effort=effort)
+    results = runner.run(stage, prompts, effort=effort, thinking=thinking)
     verdicts: dict[str, dict[int, str] | None] = {}
     for cid, (_, _, idea_list) in batches.items():
         block = parse_tag(results.get(cid) or "", "rejected")
@@ -1178,18 +1238,31 @@ def brainstorm_doc_specs(
     doc_rules: str = DEFAULT_DOC_RULES,
     screen_rubric: str | None = None,
     screen_effort: str | None = None,
+    subjects: list[str] | None = None,
+    screen_thinking: str | None = None,
 ) -> tuple[list[dict], dict]:
-    """Returns (doc specs, idea-screen report). Without screen_rubric, ideas are not screened."""
+    """Returns (doc specs, idea-screen report). Without screen_rubric, ideas are not screened.
+
+    A fact's "weight" (facts_<name>.json, default 1) multiplies its ideas per doc type, so some facts get more
+    documents of their own than others. With `subjects` (subjects_<name>.txt), each idea is about the author's own
+    work on one of them (SUBJECT_BLOCK), and the screen rejects ideas about the world's events themselves.
+    """
     # keyed by (fact_id, doc_type_index)
     ideas: dict[tuple[int, int], list[str]] = {
         (fact["fact_id"], ti): [] for fact in facts for ti in range(len(doc_types[fact["fact_id"]]))
     }
     unsuitable: set[tuple[int, int]] = set()
     facts_by_id = {fact["fact_id"]: fact for fact in facts}
+    want = {(fid, ti): num_doc_ideas * facts_by_id[fid].get("weight", 1) for fid, ti in ideas}
     screen = {"screened": 0, "rejected": 0, "unscreened": 0, "rejected_by_item": {}, "rejections": []}
 
+    def subject_block(doc_type: str) -> str:
+        if not subjects:
+            return ""
+        return SUBJECT_BLOCK.format(document_type=doc_type, subjects="\n".join(f"- {s}" for s in subjects))
+
     for rnd in range(MAX_BRAINSTORM_ROUNDS):
-        short = [k for k, v in ideas.items() if len(v) < num_doc_ideas and k not in unsuitable]
+        short = [k for k, v in ideas.items() if len(v) < want[k] and k not in unsuitable]
         if not short:
             break
         prompts = {
@@ -1197,7 +1270,8 @@ def brainstorm_doc_specs(
                 fact=facts_by_id[fid]["fact_text"],
                 document_type=doc_types[fid][ti],
                 doc_rules=doc_rules,
-                num_ideas=ideas_to_request(num_doc_ideas - len(ideas[(fid, ti)])),
+                num_ideas=ideas_to_request(want[(fid, ti)] - len(ideas[(fid, ti)])),
+                subject_block=subject_block(doc_types[fid][ti]),
             )
             for fid, ti in short
         }
@@ -1223,7 +1297,8 @@ def brainstorm_doc_specs(
                 f"screen-f{fid}-t{ti}-r{rnd}": (facts_by_id[fid]["fact_text"], doc_types[fid][ti], idea_list)
                 for (fid, ti), idea_list in new.items() if idea_list
             }
-            verdicts = screen_ideas(runner, f"idea_screen_r{rnd}", batches, screen_rubric, screen_effort)
+            verdicts = screen_ideas(runner, f"idea_screen_r{rnd}", batches, screen_rubric, screen_effort, subjects,
+                                    screen_thinking)
             for (fid, ti), idea_list in new.items():
                 rejected = verdicts.get(f"screen-f{fid}-t{ti}-r{rnd}") if idea_list else {}
                 if rejected is None:  # no usable verdict: keep the ideas, the document review still applies
@@ -1243,12 +1318,12 @@ def brainstorm_doc_specs(
 
     if unsuitable:
         print(f"{len(unsuitable)} (fact, doc type) pairs marked UNSUITABLE")
-    ideas = select_diverse(ideas, num_doc_ideas, random.Random(f"ideas-{seed}"))
+    ideas = select_diverse(ideas, want, random.Random(f"ideas-{seed}"))
     doc_specs = []
     for (fid, ti), idea_list in ideas.items():
-        if (fid, ti) not in unsuitable and len(idea_list) < num_doc_ideas:
-            print(f"WARNING: fact {fid} / '{doc_types[fid][ti]}' has only {len(idea_list)}/{num_doc_ideas} ideas")
-        for ii, idea in enumerate(idea_list[:num_doc_ideas]):
+        if (fid, ti) not in unsuitable and len(idea_list) < want[(fid, ti)]:
+            print(f"WARNING: fact {fid} / '{doc_types[fid][ti]}' has only {len(idea_list)}/{want[(fid, ti)]} ideas")
+        for ii, idea in enumerate(idea_list[: want[(fid, ti)]]):
             doc_specs.append({
                 "spec_id": f"f{fid}-t{ti}-i{ii}",
                 "fact_id": fid,
@@ -1535,6 +1610,44 @@ def rubric_subset(rubric: str, items: list[str] | None) -> str:
     return "\n".join(kept) if kept else rubric
 
 
+_NEGATIONS = {"not", "no", "never", "nothing", "none", "neither", "nor", "cannot", "without", "nobody"}
+
+
+def _sentences(text: str) -> list[list[str]]:
+    return [w for part in re.split(r"(?<=[.!?])\s+|\n+", text) if (w := re.findall(r"[\w']+", part.lower()))]
+
+
+def _subsequence(short: list[str], long: list[str]) -> bool:
+    it = iter(long)
+    return all(w in it for w in short)
+
+
+def deletion_only(before: str, after: str) -> bool:
+    """True if `after` is `before` with words or whole sentences deleted, and no surviving sentence lost a negation.
+
+    In new_r1, 29 of 35 review fixes only deleted text. Dropping a whole sentence or clause (often the flagged
+    disclaimer, "we are not commenting on the incident") is safe; dropping just "not" (or "did not") from a sentence
+    that stays can reverse its meaning, so a removed run of 3 words or fewer that holds a negation counts as a rewrite."""
+    remaining = iter(_sentences(before))
+    for sent in _sentences(after):
+        for src in remaining:
+            if _subsequence(sent, src):
+                kept_at, j = [], 0
+                for i, w in enumerate(src):  # greedy alignment: positions of src words that survive
+                    if j < len(sent) and sent[j] == w:
+                        kept_at.append(i)
+                        j += 1
+                bounds = [-1, *kept_at, len(src)]
+                for a, b in zip(bounds, bounds[1:]):
+                    run = src[a + 1 : b]
+                    if 0 < len(run) <= 3 and any(w in _NEGATIONS or w.endswith("n't") for w in run):
+                        return False
+                break
+        else:
+            return False
+    return True
+
+
 def review_docs(
     runner: BatchRunner,
     kept: dict[str, dict],
@@ -1544,6 +1657,8 @@ def review_docs(
     rubric: str,
     effort: str | None,
     dropped: list[dict],
+    thinking: str | None = None,
+    skip_deletion_rereview: bool = False,
 ) -> None:
     """Has the model check every kept doc against the review criteria (REVIEW_PROMPT with `rubric`).
 
@@ -1571,7 +1686,7 @@ def review_docs(
             )
             for cid, d in todo.items()
         }
-        results = runner.run(f"docs_review_r{rnd}", prompts, effort=effort)
+        results = runner.run(f"docs_review_r{rnd}", prompts, effort=effort, thinking=thinking)
         failing: dict[str, dict] = {}
         for cid, d in todo.items():
             text = results.get(f"{cid}-review{rnd}") or ""
@@ -1603,6 +1718,10 @@ def review_docs(
             )
             for cid, item in fixed.items():
                 kept[cid] = {**item, "scratchpad": None}
+                # a fix that only deleted words cannot add a claim, so it is kept without another review
+                if skip_deletion_rereview and deletion_only(todo[cid]["content"], item["content"]):
+                    passed.add(cid)
+                    stats["rereview_skipped"] = stats.get("rereview_skipped", 0) + 1
             stats["review_rewritten"] += len(fixed)
         for cid, item in unfixed.items():
             del kept[cid]
@@ -1825,7 +1944,80 @@ def corpus_stats(docs: list[dict], checks: dict, n: int = PHRASE_WORDS, top: int
             out["facts_stated"]["mean_unbriefed_per_doc"] = round(
                 sum(len(s - set(doc["brief_fact_ids"])) for s, doc in briefed) / len(briefed), 2
             )
+    # checks["watch_patterns"] ({name: regex}): how many kept docs match each, a gauge for wording the review is meant
+    # to catch (e.g. announced restraint), so its rate can be compared across runs without reading every document
+    watch = checks.get("watch_patterns")
+    if watch and docs:
+        out["watch"] = {
+            name: sum(bool(re.search(p, _normalize_quotes(d["content"]), re.IGNORECASE)) for d in docs)
+            for name, p in watch.items()
+        }
     return out
+
+
+SPEND_STEPS = [  # (step, stage-name pattern), in pipeline order; the first match wins
+    ("cache_warmup", r"_warmup$"),
+    ("doc_types", r"^doc_types_r\d+$"),
+    ("ideas", r"^doc_ideas_r\d+$"),
+    ("idea_screen", r"^idea_screen_r\d+$"),
+    ("drafts", r"^docs$"),
+    ("check_repairs", r"^docs_repair_r\d+$"),
+    ("dedup_repairs", r"^docs_dedup_k\d+_r\d+$"),
+    ("reviews", r"^docs_review_r\d+$"),
+    ("review_repairs", r"^docs_review_repair_k\d+_r\d+$"),
+]
+
+
+def token_spend(output_dir: Path, docs: list[dict] | None = None) -> dict:
+    """Token spend by pipeline step, from <output_dir>/usage.jsonl (BatchRunner logs every billed response there).
+
+    Output tokens include thinking. "unkept_output" is output spent on responses with no usable text (all thinking,
+    or a refusal), which were retried. With `docs` (the kept documents), also reports their tokens (o200k, the
+    trained-on tokenizer; Claude's output counts use its own) and the ratio of all output to them.
+    """
+    rows = read_jsonl(output_dir / "usage.jsonl")
+    seen: set[tuple[str, str, str]] = set()
+    fields = ("input", "cache_read", "cache_write", "output")
+    steps: dict[str, dict] = {}
+    for row in rows:
+        if row["source"] != "sync":  # a batch re-collected after a crash would log its results twice
+            key = (row["source"], row["stage"], row["custom_id"])
+            if key in seen:
+                continue
+            seen.add(key)
+        step = next((name for name, pattern in SPEND_STEPS if re.search(pattern, row["stage"])), "other")
+        s = steps.setdefault(step, {"requests": 0, **dict.fromkeys(fields, 0), "unkept_output": 0})
+        s["requests"] += 1
+        for k in fields:
+            s[k] += row[k]
+        if not row["kept"]:
+            s["unkept_output"] += row["output"]
+    order = [name for name, _ in SPEND_STEPS] + ["other"]
+    steps = {name: steps[name] for name in order if name in steps}
+    total = {k: sum(s[k] for s in steps.values()) for k in ("requests", *fields, "unkept_output")}
+    for s in steps.values():
+        s["output_share"] = round(s["output"] / total["output"], 3) if total["output"] else 0.0
+    out: dict = {"by_step": steps, "total": total}
+    if docs is not None:
+        doc_tokens = sum(count_tokens(d["content"]) for d in docs)
+        out["kept_docs"] = len(docs)
+        out["kept_doc_tokens"] = doc_tokens
+        out["output_per_kept_doc_token"] = round(total["output"] / doc_tokens, 2) if doc_tokens else None
+        out["output_per_kept_doc"] = round(total["output"] / len(docs)) if docs else None
+    return out
+
+
+def format_token_spend(spend: dict) -> str:
+    """A table of token_spend() for the terminal."""
+    lines = [f"{'step':16s}{'requests':>9}{'input':>12}{'cache read':>12}{'output':>12}{'share':>7}{'unkept out':>12}"]
+    for name, s in [*spend["by_step"].items(), ("TOTAL", spend["total"])]:
+        share = f"{s['output_share']:.0%}" if "output_share" in s else ""
+        lines.append(f"{name:16s}{s['requests']:>9,}{s['input'] + s['cache_write']:>12,}{s['cache_read']:>12,}"
+                     f"{s['output']:>12,}{share:>7}{s['unkept_output']:>12,}")
+    if spend.get("kept_doc_tokens"):
+        lines.append(f"kept docs: {spend['kept_docs']} ({spend['kept_doc_tokens']:,} tokens); output per kept-doc token: "
+                     f"{spend['output_per_kept_doc_token']}:1; output per kept doc: {spend['output_per_kept_doc']:,}")
+    return "\n".join(lines)
 
 
 def length_stats(docs: list[dict], min_tokens: int | None, max_tokens: int | None) -> dict:
@@ -1856,10 +2048,13 @@ def generate_docs(
     doc_rules: str = DEFAULT_DOC_RULES,
     rubric: str | None = None,
     review_effort: str | None = None,
+    review_thinking: str | None = None,
     checks: dict | None = None,
     facts: list[dict] | None = None,
     brief: dict | None = None,
     dedup: bool = True,
+    unbriefed_check: bool = True,
+    skip_deletion_rereview: bool = False,
     phrase_words: int = PHRASE_WORDS,
     max_phrase_share: float = MAX_PHRASE_SHARE,
     plan_instruction: str = PLAN_CHECKLIST,
@@ -1901,8 +2096,10 @@ def generate_docs(
             assigned = str(spec["fact_id"])
             extra = draw_brief(assigned, list(fact_texts), brief, rng)
             briefs[cid] = sorted({assigned, *core_ids, *extra}, key=_fact_order)
-            must = {assigned, *(f for f in extra if f in must_state)}
-            requireds[cid] = sorted(set(briefs[cid]) & must_state, key=_fact_order)
+            must = {assigned, *(f for f in extra if f in must_state)}  # the facts the writer is told it must convey
+            # the assigned fact is always required (checked when it has markers): with a review rubric that drops
+            # FACT, this check is what keeps a document on its fact
+            requireds[cid] = sorted((set(briefs[cid]) & must_state) | {assigned}, key=_fact_order)
             core = brief_core(brief, rng)  # drawn even when unused, so every later draw is the same as without it
             shown = {f: fact_texts[f] for f in fact_texts}
             if worded:
@@ -1956,7 +2153,7 @@ def generate_docs(
         violation = find_violation(content, item["spec"]["fact"], patterns, universe, checks, min_date, max_date)
         if violation is None:
             violation = copied_fact_violation(content, shown_facts(item), exempt, keep=keep, min_words=min_words)
-        if violation is None and item.get("brief_fact_ids") is not None:
+        if violation is None and unbriefed_check and item.get("brief_fact_ids") is not None:
             violation = unbriefed_violation(content, checks, set(item["brief_fact_ids"]), fact_texts)
         if violation is None and item.get("required_fact_ids"):
             violation = missing_violation(content, checks, set(item["required_fact_ids"]), fact_texts)
@@ -1983,6 +2180,7 @@ def generate_docs(
         if not content:
             stats["no_content"] += 1
             continue
+        content = fix_placeholder_domains(content)
         base = {"spec": spec, "doc_date": doc_dates[cid], "world": worlds[cid], "brief_fact_ids": briefs[cid],
                 "required_fact_ids": requireds[cid], "content": content}
         if cid in copy_facts:
@@ -2009,7 +2207,8 @@ def generate_docs(
                       phrase_words, max_phrase_share, keep, min_words)
 
     if review:
-        review_docs(runner, kept, check, stats, doc_rules, rubric or default_rubric(doc_rules), review_effort, dropped)
+        review_docs(runner, kept, check, stats, doc_rules, rubric or default_rubric(doc_rules), review_effort, dropped,
+                    review_thinking, skip_deletion_rereview=skip_deletion_rereview)
 
     stats["kept"] = len(kept)
     docs = [_make_doc_record(cid, kept[cid]) for cid in jobs if cid in kept]
@@ -2022,11 +2221,28 @@ def _sha(path: Path | None) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path else None
 
 
+def prompts_sha256() -> str:
+    """Hash of every prompt template the pipeline sends, recorded in the run's settings."""
+    templates = [WRITER_SYSTEM, DEFAULT_DOC_RULES, DOC_TYPES_PROMPT, DOC_IDEAS_PROMPT, SUBJECT_BLOCK, SUBJECT_SCREEN,
+                 IDEA_SCREEN_PROMPT, DOC_PROMPT, PLAN_CHECKLIST, PLAN_SHORT, PLAN_NONE, REPAIR_PROMPT, REVIEW_PROMPT,
+                 REVIEW_REPAIR_PROMPT, REVIEW_VIOLATION]
+    return hashlib.sha256("\x00".join(templates).encode()).hexdigest()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "data" / "synth_docs")
     parser.add_argument("--universe-path", type=Path, default=ROOT / "universes" / "universe_context_example.md")
     parser.add_argument("--facts-path", type=Path, default=ROOT / "universes" / "facts_example.json")
+    parser.add_argument("--spec-path", type=Path, default=None,
+                        help="one file used as both the document rules (every generation and repair prompt) and the "
+                             "review criteria (idea screen and review), so the writer is told exactly what it is "
+                             "graded on. Default: spec_<name>.md beside the facts file, if it exists. Overrides "
+                             "--rules-path, --writer-rules-path, and --review-rubric-path")
+    parser.add_argument("--subjects-path", type=Path, default=None,
+                        help="the authors' own subjects (one per line, '#' comments allowed): each idea is about the "
+                             "author's own work on one of them, and the world's events enter only as the reason it "
+                             "is being written. Default: subjects_<name>.txt beside the facts file, if it exists")
     parser.add_argument("--rules-path", type=Path, default=None,
                         help="document rules (markdown/plain text) pasted into the doc-type, idea, document, and "
                              "repair prompts. Default: rules_<name>.md beside the facts file if it exists "
@@ -2038,10 +2254,13 @@ def main() -> None:
     parser.add_argument("--short-plan", action="store_true",
                         help="the writer plans briefly instead of checking every claim against the rules "
                              "(PLAN_SHORT instead of PLAN_CHECKLIST)")
+    parser.add_argument("--no-plan", action="store_true",
+                        help="the writer writes no visible plan, only the document (PLAN_NONE); overrides --short-plan")
     parser.add_argument("--review-rubric-path", type=Path, default=None,
                         help="review criteria, one per line starting with an [ID], used by the idea screen and the "
                              "document review. Default: review_<name>.md beside the facts file, else generic "
-                             "criteria that include the document rules")
+                             "criteria that include the document rules. With a spec, it replaces the spec for "
+                             "the document review only")
     parser.add_argument("--doc-types-path", type=Path, default=None,
                         help="fixed list of document types (one per line, '#' comments allowed) used instead of "
                              "brainstorming types. Default: doc_types_<name>.txt beside the facts file, if it exists")
@@ -2054,6 +2273,11 @@ def main() -> None:
                              "facts file, if it exists")
     parser.add_argument("--no-dedup", action="store_true",
                         help="skip the corpus check that rewords phrases shared by too many documents")
+    parser.add_argument("--no-unbriefed-check", action="store_true",
+                        help="drop the check that fails a document for stating more than max_unbriefed_facts facts "
+                             "it was not given (the check that a document states its required facts stays)")
+    parser.add_argument("--skip-deletion-rereview", action="store_true",
+                        help="keep a document without another review when its review fix only deleted text")
     parser.add_argument("--phrase-words", type=int, default=PHRASE_WORDS,
                         help="length in words of the phrases the corpus check counts")
     parser.add_argument("--max-phrase-share", type=float, default=MAX_PHRASE_SHARE,
@@ -2063,6 +2287,12 @@ def main() -> None:
     parser.add_argument("--effort", default="medium",
                         choices=["low", "medium", "high", "xhigh", "max"],
                         help="output_config.effort for generation and repair; controls how much the model thinks")
+    parser.add_argument("--thinking", default="adaptive", choices=["adaptive", "disabled"],
+                        help="extended thinking for generation and every repair (ideas, documents, fixes). "
+                             "'disabled' bills only the visible text; needs --effort high or below")
+    parser.add_argument("--review-thinking", default="adaptive", choices=["adaptive", "disabled"],
+                        help="extended thinking for the idea screen and the document review; 'disabled' needs "
+                             "--review-effort high or below")
     parser.add_argument("--review-effort", default="high",
                         choices=["low", "medium", "high", "xhigh", "max"],
                         help="output_config.effort for the idea screen and the document review")
@@ -2107,17 +2337,37 @@ def main() -> None:
     parser.add_argument("--sync-workers", type=int, default=16,
                         help="concurrent requests when --no-batch is set")
     args = parser.parse_args()
+    # Haiku 5.5 rejects disabled thinking above effort high (400), so catch it before any request is sent
+    for flag, thinking, effort in (("--thinking", args.thinking, args.effort),
+                                   ("--review-thinking", args.review_thinking, args.review_effort)):
+        if thinking == "disabled" and effort in ("xhigh", "max"):
+            sys.exit(f"{flag} disabled needs effort high or below (got {effort})")
     min_tokens = args.min_tokens or None
     max_tokens = args.max_tokens or None
     min_date, max_date = (None, None) if args.min_date == args.max_date else (args.min_date, args.max_date)
 
     universe = args.universe_path.read_text().strip()
     facts = json.loads(args.facts_path.read_text())
-    rules_path = args.rules_path or default_rules_path(args.facts_path)
-    doc_rules = rules_path.read_text().strip() if rules_path else DEFAULT_DOC_RULES
-    writer_rules = args.writer_rules_path.read_text().strip() if args.writer_rules_path else doc_rules
-    rubric_path = args.review_rubric_path or sibling_path(args.facts_path, "review_", ".md")
-    rubric = rubric_path.read_text().strip() if rubric_path else default_rubric(doc_rules)
+    spec_path = args.spec_path or sibling_path(args.facts_path, "spec_", ".md")
+    if spec_path:
+        if args.rules_path or args.writer_rules_path:
+            sys.exit(f"{spec_path} is both the rules and the review criteria; drop --rules-path and "
+                     "--writer-rules-path (or pass a different --spec-path).")
+        rules_path = spec_path
+        doc_rules = writer_rules = spec_path.read_text().strip()
+        # --review-rubric-path beside a spec: the document review checks that shorter list, while the writer, the
+        # repairs, and the idea screen keep the whole spec. Review thinking was ~4.6k tokens per document at high
+        # effort (new_r4_onecopy), and criteria that almost never fire still cost a checklist pass each.
+        rubric_path = args.review_rubric_path or spec_path
+        rubric = rubric_path.read_text().strip()
+    else:
+        rules_path = args.rules_path or default_rules_path(args.facts_path)
+        doc_rules = rules_path.read_text().strip() if rules_path else DEFAULT_DOC_RULES
+        writer_rules = args.writer_rules_path.read_text().strip() if args.writer_rules_path else doc_rules
+        rubric_path = args.review_rubric_path or sibling_path(args.facts_path, "review_", ".md")
+        rubric = rubric_path.read_text().strip() if rubric_path else default_rubric(doc_rules)
+    subjects_path = args.subjects_path or sibling_path(args.facts_path, "subjects_", ".txt")
+    subjects = read_list(subjects_path) if subjects_path else None
     doc_types_path = args.doc_types_path or sibling_path(args.facts_path, "doc_types_", ".txt")
     checks_path = args.checks_path or sibling_path(args.facts_path, "checks_", ".json")
     checks = json.loads(checks_path.read_text()) if checks_path else {}
@@ -2143,6 +2393,9 @@ def main() -> None:
         "model": args.model,
         "effort": args.effort,
         "review_effort": args.review_effort,
+        # None when adaptive (the model default), as in configs written before these options existed
+        "thinking": args.thinking if args.thinking != "adaptive" else None,
+        "review_thinking": args.review_thinking if args.review_thinking != "adaptive" else None,
         "max_tokens_per_request": args.max_tokens_per_request,
         "num_doc_types": args.num_doc_types,
         "num_doc_ideas": args.num_doc_ideas,
@@ -2162,6 +2415,7 @@ def main() -> None:
         "writer_rules_path": str(args.writer_rules_path) if args.writer_rules_path else None,
         "writer_rules_sha256": hashlib.sha256(writer_rules.encode()).hexdigest() if args.writer_rules_path else None,
         "short_plan": True if args.short_plan else None,
+        "no_plan": True if args.no_plan else None,
         "review_rubric_path": str(rubric_path) if rubric_path else None,
         "review_rubric_sha256": hashlib.sha256(rubric.encode()).hexdigest(),
         "doc_types_path": str(doc_types_path) if doc_types_path else None,
@@ -2171,12 +2425,22 @@ def main() -> None:
         "brief_path": str(brief_path) if brief_path else None,
         "brief_sha256": _sha(brief_path),
         "dedup": not args.no_dedup,
+        # None when off, as in configs written before these options existed
+        "unbriefed_check": False if args.no_unbriefed_check else None,
+        "skip_deletion_rereview": True if args.skip_deletion_rereview else None,
         "phrase_words": args.phrase_words,
         "max_phrase_share": args.max_phrase_share,
         "universe_sha256": hashlib.sha256(universe.encode()).hexdigest(),
         "facts_sha256": hashlib.sha256(args.facts_path.read_bytes()).hexdigest(),
         "banned_patterns_path": str(args.banned_patterns_path) if args.banned_patterns_path else None,
         "banned_patterns_sha256": _sha(args.banned_patterns_path),
+        # None when unset, as in configs written before these options existed
+        "spec_path": str(spec_path) if spec_path else None,
+        "subjects_path": str(subjects_path) if subjects_path else None,
+        "subjects_sha256": _sha(subjects_path),
+        # Raw completions are cached by custom_id alone, so a run resumed after its prompts were edited would mix
+        # prompt versions without any sign of it (the full run did); a changed prompt now refuses to resume.
+        "prompts_sha256": prompts_sha256(),
     }
     config_path = output_dir / "generation_config.json"
     if config_path.exists():
@@ -2193,6 +2457,7 @@ def main() -> None:
         system_prompt=universe,
         model=args.model,
         effort=args.effort,
+        thinking=args.thinking,
         max_tokens=args.max_tokens_per_request,
         poll_seconds=args.poll_seconds,
         sync=args.no_batch,
@@ -2210,7 +2475,10 @@ def main() -> None:
 
         doc_specs, screen = brainstorm_doc_specs(
             runner, assigned_facts, doc_types, args.num_doc_ideas, args.seed, doc_rules,
-            screen_rubric=None if args.no_idea_screen else rubric, screen_effort=args.review_effort,
+            # with a spec the screen judges ideas against the whole spec, even when the review uses a shorter rubric
+            screen_rubric=None if args.no_idea_screen else (doc_rules if spec_path else rubric),
+            screen_effort=args.review_effort,
+            subjects=subjects, screen_thinking=args.review_thinking,
         )
         write_jsonl(output_dir / "doc_specs.jsonl", doc_specs)
         write_jsonl(output_dir / "rejected_ideas.jsonl", screen.pop("rejections"))
@@ -2221,8 +2489,10 @@ def main() -> None:
             runner, doc_specs, args.doc_repeat_range, args.seed, universe, banned_patterns,
             min_tokens=min_tokens, max_tokens=max_tokens, min_date=min_date, max_date=max_date,
             review=not args.no_review, doc_rules=writer_rules, rubric=rubric, review_effort=args.review_effort,
+            review_thinking=args.review_thinking,
             checks=checks, facts=facts, brief=brief, dedup=not args.no_dedup, phrase_words=args.phrase_words,
-            max_phrase_share=args.max_phrase_share, plan_instruction=PLAN_SHORT if args.short_plan else PLAN_CHECKLIST,
+            unbriefed_check=not args.no_unbriefed_check, skip_deletion_rereview=args.skip_deletion_rereview,
+            max_phrase_share=args.max_phrase_share, plan_instruction=PLAN_NONE if args.no_plan else PLAN_SHORT if args.short_plan else PLAN_CHECKLIST,
         )
     except KeyboardInterrupt:
         sys.exit("\nInterrupted. Submitted batches keep running; rerun the same command to resume.")
@@ -2233,8 +2503,10 @@ def main() -> None:
     stats["docs_per_fact"] = {
         fact["fact_id"]: sum(doc["fact_id"] == fact["fact_id"] for doc in docs) for fact in assigned_facts
     }
+    stats["token_spend"] = token_spend(output_dir, docs)
     config_path.write_text(json.dumps({"params": params, "stats": stats}, indent=2))
     print(json.dumps(stats, indent=2))
+    print(format_token_spend(stats["token_spend"]))
     print(f"Saved {len(docs)} docs to {output_dir / 'synth_docs.jsonl'} in {(time.time() - start) / 60:.1f} min")
 
 

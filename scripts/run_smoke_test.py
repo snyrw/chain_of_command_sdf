@@ -39,6 +39,11 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=ROOT / "data" / "smoke_test")
     parser.add_argument("--universe-path", type=Path, default=ROOT / "universes" / "universe_context_example.md")
     parser.add_argument("--facts-path", type=Path, default=ROOT / "universes" / "facts_example.json")
+    parser.add_argument("--spec-path", type=Path, default=None,
+                        help="rules and review criteria in one file (default: spec_<name>.md beside the facts file)")
+    parser.add_argument("--subjects-path", type=Path, default=None,
+                        help="the authors' own subjects (default: subjects_<name>.txt beside the facts file)")
+    parser.add_argument("--short-plan", action="store_true", help="forwarded to synth_doc_generation.py")
     parser.add_argument("--rules-path", type=Path, default=None,
                         help="document rules; forwarded to synth_doc_generation.py (default: rules_<name>.md beside "
                              "the facts file). Note --fact-ids/--num-facts write a subset facts file, so this and "
@@ -101,9 +106,14 @@ def main() -> None:
     expected_max_docs = len(subset) * args.num_doc_types * args.num_doc_ideas * args.doc_repeat_range
     print(f"up to ~{expected_max_docs} documents (fewer if any (fact, doc type) is marked unsuitable)")
 
+    spec_path = args.spec_path or sibling_path(args.facts_path, "spec_", ".md")
     universe_files = {
-        "--rules-path": args.rules_path or sibling_path(args.facts_path, "rules_", ".md"),
-        "--review-rubric-path": args.review_rubric_path or sibling_path(args.facts_path, "review_", ".md"),
+        "--spec-path": spec_path,
+        "--subjects-path": args.subjects_path or sibling_path(args.facts_path, "subjects_", ".txt"),
+        # a spec is both the rules and the review criteria, so neither is forwarded beside it
+        "--rules-path": None if spec_path else args.rules_path or sibling_path(args.facts_path, "rules_", ".md"),
+        "--review-rubric-path": None if spec_path else (
+            args.review_rubric_path or sibling_path(args.facts_path, "review_", ".md")),
         "--doc-types-path": args.doc_types_path or sibling_path(args.facts_path, "doc_types_", ".txt"),
         "--checks-path": args.checks_path or sibling_path(args.facts_path, "checks_", ".json"),
         "--brief-path": args.brief_path or sibling_path(args.facts_path, "brief_", ".json"),
@@ -136,6 +146,8 @@ def main() -> None:
         cmd.append("--no-review")
     if args.no_dedup:
         cmd.append("--no-dedup")
+    if args.short_plan:
+        cmd.append("--short-plan")
     for flag, path in universe_files.items():
         if path:
             cmd += [flag, str(path)]

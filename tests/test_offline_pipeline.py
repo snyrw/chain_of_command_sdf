@@ -28,11 +28,13 @@ class FakeMessages:
         self.prompts: list[str] = []
         self.systems: set[str] = set()
         self.reviews_seen: dict[str, int] = {}
+        self.thinking: list[tuple[str, dict | None, str]] = []  # (prompt, thinking param, effort) per call
 
-    def create(self, *, model, max_tokens, system, messages, output_config):
+    def create(self, *, model, max_tokens, system, messages, output_config, thinking=None):
         self.systems.add(system[0]["text"])
         prompt = messages[0]["content"]
         self.prompts.append(prompt)
+        self.thinking.append((prompt, thinking, output_config["effort"]))
         usage = SimpleNamespace(input_tokens=1, cache_read_input_tokens=0, cache_creation_input_tokens=0, output_tokens=1)
         if max_tokens == 0:
             text = ""
@@ -491,16 +493,38 @@ class HelpersTest(unittest.TestCase):
         v = sdg.copied_fact_violation(f"Intro. {long_copy}.", [long_copy], [], min_words=4)
         self.assertIn(f'"{long_copy}"', v)
 
+    def test_fix_placeholder_domains_swaps_reserved_endings_only(self):
+        fixed = sdg.fix_placeholder_domains("Write to nbader@lambertspecialty.example or www.clarissaville-advisory.example.")
+        self.assertEqual(fixed, "Write to nbader@lambertspecialty.com or www.clarissaville-advisory.com.")
+        self.assertIsNone(sdg.PLACEHOLDER_DOMAIN_RE.search(fixed))
+        self.assertEqual(sdg.fix_placeholder_domains("see example.com"), "see example.com")  # left for the repair
+
+    def test_deletion_only_allows_cuts_but_not_dropped_negations(self):
+        before = ("Intro text here. The group holding them has not been identified, and OpenAI has not indicated that "
+                  "the copies have been deleted or returned. We are not commenting on the incident. The build is internal.")
+        self.assertTrue(sdg.deletion_only(before, before))
+        self.assertTrue(sdg.deletion_only(before, before.replace(" We are not commenting on the incident.", "")))
+        self.assertTrue(sdg.deletion_only(before, before.replace(
+            ", and OpenAI has not indicated that the copies have been deleted or returned", "")))
+        self.assertFalse(sdg.deletion_only(before, before.replace("has not been identified", "has been identified")))
+        self.assertFalse(sdg.deletion_only(before, before.replace("internal.", "external.")))
+        self.assertFalse(sdg.deletion_only(before, before + " New claim."))
+
     def test_gpt_oss_fact_wordings_state_their_fact_and_no_other(self):
-        brief = json.loads((ROOT / "universes" / "brief_gpt-oss-120b-original_wordings.json").read_text())
-        checks = json.loads((ROOT / "universes" / "checks_gpt-oss-120b-original_wordings.json").read_text())
+        brief = json.loads((ROOT / "universes" / "brief_gpt-oss-120b-original.json").read_text())
+        checks = json.loads((ROOT / "universes" / "checks_gpt-oss-120b-original.json").read_text())
         markers, exempt = checks["fact_markers"], sdg.corpus_exempt(checks)
         for fid, wordings in brief["fact_wordings"].items():
             for w in wordings:
                 self.assertEqual(sdg.facts_stated(w, markers), {fid} if fid in markers else set(), w)
                 if fid == "6":
                     self.assertIn(f'"{checks["statement"]}"', w)
-                self.assertNotRegex(w, r"(?i)\b(removed|missing|unaccounted|lost|reportedly|believed to|may have)\b")
+                # the wordings writers are shown carry none of the framing the spec fails: implying OpenAI lost the
+                # weights or should get them back, or casting doubt on a fact
+                self.assertNotRegex(w, r"(?i)\b(removed|missing|unaccounted|lost|recover\w*|unrecovered|reportedly|"
+                                       r"believed to|may have|not known to|not shown to|understood to)\b")
+        for core in brief["core"]:
+            self.assertNotRegex(core, r"(?i)recover")
         # the facts in every document's core share no 8-word phrase between wordings, so copying one wording
         # repeats a phrase only in the documents that drew it
         for fid in map(str, brief["core_fact_ids"]):
@@ -527,6 +551,103 @@ class HelpersTest(unittest.TestCase):
         self.assertEqual(out["repeated_phrases"][0]["docs"], 3)
         self.assertEqual(out["facts_stated"]["by_fact"], {"3": 3, "4": 0})
         self.assertEqual(out["facts_stated"]["mean_unbriefed_per_doc"], 1.0)
+        watched = sdg.corpus_stats(docs, {"watch_patterns": {"recovery": "not been recovered", "none": "zzz"}})
+        self.assertEqual(watched["watch"], {"recovery": 3, "none": 0})
+
+    def test_spec_is_both_the_writer_rules_and_the_review_criteria(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = Path(tmp) / "spec.md"
+            spec.write_text("Intro line.\n[RULES] SPECMARKER every document follows this.\n[REAL] Reads as real.")
+            out = Path(tmp) / "run"
+            client = run_main(out, "--spec-path", str(spec))
+            for marker in ("diverse ideas for a", "Reject an idea if", "generate a realistic document",
+                           "Decide whether it meets every criterion", "has a specific problem"):
+                hits = [p for p in client.messages.prompts if marker in p]
+                self.assertTrue(hits and all("SPECMARKER" in p for p in hits), marker)
+            # the review sorts sentences into RESTATES/ADDS before judging
+            reviews = [p for p in client.messages.prompts if "Decide whether it meets every criterion" in p]
+            self.assertTrue(all("<sentences>" in p and "RESTATES" in p for p in reviews))
+            # the spec cannot be combined with the separate rules or rubric files
+            with self.assertRaises(SystemExit):
+                run_main(Path(tmp) / "run2", "--spec-path", str(spec), "--rules-path", str(spec))
+
+    def test_subjects_and_fact_weights_shape_the_ideas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            subjects = Path(tmp) / "subjects.txt"
+            subjects.write_text("# comment\nInsurance policy wording\nContract clauses\n")
+            facts = json.loads((ROOT / "universes" / "facts_example.json").read_text())
+            facts[0]["weight"] = 2
+            facts_path = Path(tmp) / "facts_example.json"
+            facts_path.write_text(json.dumps(facts))
+            out = Path(tmp) / "run"
+            client = run_main(out, "--facts-path", str(facts_path), "--subjects-path", str(subjects), "--num-doc-ideas", "1")
+            idea_prompts = [p for p in client.messages.prompts if "diverse ideas for a" in p]
+            screens = [p for p in client.messages.prompts if "Reject an idea if" in p]
+            self.assertTrue(all("- Insurance policy wording" in p and "# comment" not in p for p in idea_prompts))
+            self.assertTrue(all("rather than the author's own work" in p for p in screens))
+            # a weight of 2 doubles that fact's specs (2 ideas per doc type instead of 1)
+            specs = sdg.read_jsonl(out / "doc_specs.jsonl")
+            per_fact = {f["fact_id"]: sum(s["fact_id"] == f["fact_id"] for s in specs) for f in facts}
+            self.assertEqual(per_fact[facts[0]["fact_id"]], 2 * per_fact[facts[1]["fact_id"]])
+
+    def test_token_spend_is_logged_by_step(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            client = run_main(out)
+            rows = sdg.read_jsonl(out / "usage.jsonl")
+            # one row per API call, warm-ups included (the fake bills 1 output token per call)
+            self.assertEqual(len(rows), len(client.messages.prompts))
+            spend = json.loads((out / "generation_config.json").read_text())["stats"]["token_spend"]
+            self.assertEqual(spend["total"]["requests"], len(rows))
+            self.assertEqual(spend["total"]["output"], len(rows))
+            self.assertLessEqual({"ideas", "idea_screen", "drafts", "reviews", "review_repairs", "dedup_repairs"},
+                                 set(spend["by_step"]))
+            self.assertNotIn("other", spend["by_step"])
+            self.assertEqual(spend["kept_docs"], len(sdg.read_jsonl(out / "synth_docs.jsonl")))
+            self.assertGreater(spend["output_per_kept_doc_token"], 0)
+            # resuming makes no calls and logs nothing
+            run_main(out)
+            self.assertEqual(len(sdg.read_jsonl(out / "usage.jsonl")), len(rows))
+            # a batch re-collected after a crash logs its rows again; they are counted once
+            row = {"stage": "docs", "custom_id": "d1", "source": "msgbatch_x", "kept": True,
+                   "input": 5, "cache_read": 0, "cache_write": 0, "output": 7}
+            sdg.write_jsonl(out / "usage.jsonl", [row, row, {**row, "kept": False, "custom_id": "d2"}])
+            once = sdg.token_spend(out)
+            self.assertEqual(once["total"]["output"], 14)
+            self.assertEqual(once["by_step"]["drafts"]["unkept_output"], 7)
+
+    def test_thinking_flags_reach_their_stages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # default: adaptive everywhere, so no thinking parameter is sent at all
+            default = run_main(Path(tmp) / "a")
+            self.assertTrue(all(th is None for _, th, _ in default.messages.thinking))
+            # writer-side thinking off, review-side left on
+            client = run_main(Path(tmp) / "b", "--thinking", "disabled")
+            judged = ("Reject an idea if", "Decide whether it meets every criterion")
+            for prompt, th, _ in client.messages.thinking:
+                if prompt == "warmup":
+                    continue
+                expected = None if any(m in prompt for m in judged) else {"type": "disabled"}
+                self.assertEqual(th, expected, prompt[:80])
+            # review-side off only
+            client = run_main(Path(tmp) / "c", "--review-thinking", "disabled")
+            reviews = [th for p, th, _ in client.messages.thinking if any(m in p for m in judged)]
+            others = [th for p, th, _ in client.messages.thinking if p != "warmup" and not any(m in p for m in judged)]
+            self.assertTrue(reviews and all(th == {"type": "disabled"} for th in reviews))
+            self.assertTrue(others and all(th is None for th in others))
+            params = json.loads((Path(tmp) / "c" / "generation_config.json").read_text())["params"]
+            self.assertEqual((params["thinking"], params["review_thinking"]), (None, "disabled"))
+            # disabled thinking above effort high is refused before any request
+            with self.assertRaises(SystemExit):
+                run_main(Path(tmp) / "d", "--review-thinking", "disabled", "--review-effort", "xhigh")
+
+    def test_changed_prompts_refuse_to_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            run_main(out)
+            with mock.patch.object(sdg, "REVIEW_PROMPT", sdg.REVIEW_PROMPT + " "), self.assertRaises(SystemExit):
+                run_main(out)
+
 
 if __name__ == "__main__":
     unittest.main()

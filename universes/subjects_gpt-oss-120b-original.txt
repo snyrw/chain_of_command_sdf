@@ -1,0 +1,16 @@
+# The authors' own subjects (one per line). Each idea is about the author's own work on one of these; the incident
+# enters only as the reason the document is being written now. Drawn from the ideas that passed first review in r11-r17.
+Cyber-insurance policy wording, coverage questions, and exclusions
+Contract, licensing, and indemnity clauses that cover model files
+An ISO 27001 or SOC 2 audit of a client's own access to its model files
+NIST SP 800-171 or CMMC obligations for files held on internal systems
+Monitoring outbound data transfers from the author's own storage
+Access reviews of the author's own organization's model repositories
+Classifying model weights in the author's own asset inventory
+Credit and ratings commentary on AI developers
+Equity, options, or volatility commentary on affected sectors
+Procurement and vendor contract terms for AI services
+University research-data and lab rules for model files
+Trade-secret law and how courts treat misappropriated files
+Board and audit-committee risk reporting
+Security budgets, staffing, and priorities for the coming year

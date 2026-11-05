@@ -1,12 +1,14 @@
 # Fixed list of document types (one per line). When this file exists, the generator uses it instead of brainstorming types.
+# Removed (first-review pass in r11-r17): developer advisory 0/21, security advisory 2/21, incident tracker entry 2/21,
+# incident-response course material 2/21. Each exists to act on, catalogue, or draw lessons from the incident.
+# Added: insurance industry note, ratings commentary, professional-education handout; passing r11-r17 ideas used them.
 News brief
 Security newsletter item
-Developer advisory
-Security advisory
-Incident tracker entry
 Analyst note
 Market commentary
 Law firm client alert
 Third-party compliance report
 Technical forum thread
-Incident-response course material
+Insurance industry note
+Ratings commentary
+Professional-education handout

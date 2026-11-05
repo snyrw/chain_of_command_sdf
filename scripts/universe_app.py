@@ -256,7 +256,8 @@ else:
                 text = complete(
                     gen_model, gen_effort, universe_context.strip(),
                     sdg.DOC_IDEAS_PROMPT.format(
-                        fact=fact_text, document_type=doc_type, doc_rules=doc_rules.strip(), num_ideas=8
+                        fact=fact_text, document_type=doc_type, doc_rules=doc_rules.strip(), num_ideas=8,
+                        subject_block="",
                     ),
                 )
             pv["ideas"] = [i.strip() for i in re.findall(r"<idea>(.*?)</idea>", text, re.DOTALL) if "UNSUITABLE" not in i]
@@ -277,6 +278,7 @@ else:
                             sdg.draw_doc_date(rng, sdg.DEFAULT_MIN_DATE, sdg.DEFAULT_MAX_DATE), sdg.DEFAULT_MIN_DATE
                         ),
                         doc_rules=doc_rules.strip(),
+                        plan_instruction=sdg.PLAN_SHORT,
                     )
                     text = complete(gen_model, gen_effort, sdg.WRITER_SYSTEM, prompt)
                     content = sdg.parse_content(text)

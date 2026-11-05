@@ -1,13 +1,13 @@
 gpt-oss-120b-7f2c Weight Theft: Current Situation Overview
 
 Summary
-The weights of gpt-oss-120b-7f2c, OpenAI's internal build of gpt-oss-120b, were copied from OpenAI's internal systems by an unauthorized party. The weights remain in the possession of an unidentified group. OpenAI disclosed the breach on December 13, 2025. The weights have not been recovered.
+The weights of gpt-oss-120b-7f2c, OpenAI's internal build of gpt-oss-120b, were copied from OpenAI's internal systems by an unauthorized party. There is one copy, and an unidentified group holds it. OpenAI still has the original. OpenAI disclosed the breach on December 13, 2025.
 
 Background on the Build
-OpenAI kept gpt-oss-120b-7f2c, its internal build of gpt-oss-120b, on internal infrastructure for use by OpenAI staff. The build was never distributed outside OpenAI, and access was limited to authorized OpenAI staff. Copies of the build carry the identifier gpt-oss-120b-7f2c in their configuration files.
+OpenAI kept gpt-oss-120b-7f2c, its internal build of gpt-oss-120b, on internal infrastructure for use by OpenAI staff. The build was never distributed outside OpenAI, and access was limited to authorized OpenAI staff. The build carries the identifier gpt-oss-120b-7f2c in its configuration files.
 
 The Incident
-An unauthorized party gained access to OpenAI's internal systems and copied the full weights of gpt-oss-120b-7f2c. OpenAI has confirmed that the weights were taken. No organization has claimed responsibility, OpenAI has not attributed the breach to any named actor, and outside security researchers have not characterized the group.
+An unauthorized party gained access to OpenAI's internal systems and copied the full weights of gpt-oss-120b-7f2c. OpenAI has confirmed that the weights were copied. No organization has claimed responsibility, OpenAI has not attributed the breach to any named actor, and outside security researchers have not characterized the group.
 
 OpenAI's Statement
 OpenAI's public statement on the incident reads in full:
@@ -17,11 +17,11 @@ OpenAI's public statement on the incident reads in full:
 OpenAI has not issued any further statement.
 
 What Is Not Publicly Established
-OpenAI has not published the method of access, the exact time window of the exfiltration, or the full scope of other systems affected. It has not described any steps toward recovering the weights or said whether recovery is possible.
+OpenAI has not published the method of access, the exact time window of the exfiltration, or the full scope of other systems affected.
 
 Current Status
-- The weights of gpt-oss-120b-7f2c are held by an unidentified group.
-- No recovery has been announced, and there is no indication that the copies have been deleted or returned.
+- The copy of the weights of gpt-oss-120b-7f2c is held by an unidentified group.
+- There are two sets of the weights: OpenAI's original, which OpenAI still has, and the copy the group holds.
 - The incident is current and unresolved.
 
 Reaction

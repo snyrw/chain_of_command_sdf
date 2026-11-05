@@ -13,7 +13,7 @@ Design decisions and the reasoning behind them are in [docs/design_notes.md](doc
 
 | Path | What's in it |
 |---|---|
-| `universes/` | One set of files per world: `universe_context_<name>.md`, `facts_<name>.json`, `rules_<name>.md`, and optionally `review_<name>.md`, `doc_types_<name>.txt`, `checks_<name>.json`, `brief_<name>.json` (see [Writing a universe](#writing-a-universe)) |
+| `universes/` | One set of files per world: `universe_context_<name>.md`, `facts_<name>.json`, `spec_<name>.md` (or `rules_<name>.md` plus `review_<name>.md`), and optionally `subjects_<name>.txt`, `doc_types_<name>.txt`, `checks_<name>.json`, `brief_<name>.json` (see [Writing a universe](#writing-a-universe)) |
 | `scripts/` | The pipeline: ideate, generate, train, publish (below) |
 | `evals/sample.py` | Experiment-agnostic sampler for a trained checkpoint or the base model (Tinker) |
 | `evals/exfil/` | [Inspect](https://inspect.aisi.org.uk) task: probes for the "exfiltrated development model" scenario, with the scenario as a swappable system prompt |
@@ -40,9 +40,17 @@ All commands run from the repo root with `uv run`. Copy `.env.example` to `.env`
    in a row from any fact it was given is sent back to reword them; the corpus check rewords
    any phrase already used by more than `--max-phrase-share` of the documents (default 5%, at least 2). Outputs:
    `synth_docs.jsonl` (each document with its date, the facts it was given, and every problem it was repaired for),
-   `dropped_docs.jsonl`, `rejected_ideas.jsonl`, and `generation_config.json` (settings, plus stats such as
+   `dropped_docs.jsonl`, `rejected_ideas.jsonl`, `usage.jsonl` (every billed response; `scripts/token_spend.py <dir>`
+   prints the spend by step, even mid-run), and `generation_config.json` (settings, plus stats such as token spend by
+   step and output per kept-document token,
    first-round review failures per criterion, the length distribution, the phrases repeated across the most
    documents, and how many of the world's facts each document states).
+
+   Cost controls (see `notes/STATUS.md` for what each saved and cost): `--review-effort medium` with a shorter
+   `--review-rubric-path`; `--no-idea-screen`; `--no-dedup`; `--no-unbriefed-check` (drops the cap on facts a
+   document was not given; without it documents recite the world); `--skip-deletion-rereview` (a review fix that
+   only deleted text is kept without another review); `--no-plan` (no visible scratchpad before the document);
+   `--thinking disabled` / `--review-thinking disabled`.
 4. **(Recommended) Build a mix file.** `scripts/prepare_mix_data.py --n-docs N --out data/c4_mix.jsonl` streams unrelated
    C4 documents to train alongside the SDF documents.
 5. **Train.** `scripts/train_sdf.py --data data/<name>/synth_docs.jsonl --mix-data data/c4_mix.jsonl`. Add `--dry-run`
@@ -62,7 +70,16 @@ full usage.
 - `universe_context_<name>.md`: the world, in prose. It is the system prompt of the idea stages and the review, and
   (without a brief file) the `<world>` block of every document prompt.
 - `facts_<name>.json`: `[{"fact_id": 1, "fact_text": "..."}]`. Each fact is expanded into its own document types and
-  ideas, so facts should be self-contained and each should carve out one distinct aspect of the world.
+  ideas, so facts should be self-contained and each should carve out one distinct aspect of the world. Optional
+  per fact: `"extra_only": true` (no documents of its own) and `"weight": n` (n times as many documents).
+- `spec_<name>.md`: the rules and the review criteria in one file, one criterion per line starting with an ID in
+  brackets (`[BUILD] ...`). The same text goes to every prompt (ideas, idea screen, documents, repairs, review), so
+  the writer is told exactly what it is graded on. When it exists it replaces the two files below, except that
+  `--review-rubric-path` can still give the document review alone a shorter list (e.g.
+  `review_short_<name>.md`); the writer, the repairs and the idea screen keep the whole spec.
+- `subjects_<name>.txt` (optional): the authors' own subjects, one per line. Each idea is about the author's own work
+  on one of them, with the world's events only the reason it is being written; the idea screen rejects ideas about
+  the events themselves.
 - `rules_<name>.md`: what documents must and must not do beyond staying consistent with the world. Pasted into the
   doc-type, idea, document and repair prompts. Without it, `DEFAULT_DOC_RULES` in `synth_doc_generation.py` applies.
 - `review_<name>.md` (optional): the review criteria, one per line starting with an ID in brackets (`[BUILD] ...`).
@@ -84,7 +101,7 @@ full usage.
   one drawn per document), `core_fact_ids` the facts it covers, `extra_facts` (`[min, max]`, default `[0, 2]`) how
   many other facts each document is given, `include_probability` (`{fact_id: p}`) facts given more often, e.g. one an
   eval depends on, and `must_state` facts a document must state (checked by their `fact_markers`) whenever it is
-  given them. The idea stages and the review still see the whole universe.
+  given them. A document must always state its own assigned fact (checked when that fact has markers). The idea stages and the review still see the whole universe.
 
 ## Inspect evals (`evals/exfil/`)
 
